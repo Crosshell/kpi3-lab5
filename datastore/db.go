@@ -23,6 +23,7 @@ type IndexOperation struct {
 	isWrite  bool
 	key      string
 	position int64
+	response chan *KeyLocation
 }
 
 type WriteOperation struct {
@@ -43,30 +44,34 @@ type Db struct {
 	maxSegmentSize  int64
 	segmentCounter  int
 	indexOperations chan IndexOperation
-	keyLocations    chan *KeyLocation
 	writeOperations chan WriteOperation
-	writeComplete   chan error
-	keyIndex        keyIndex
 	segments        []*Segment
 	fileLock        sync.Mutex
-	indexLock       sync.Mutex
+	segmentLock     sync.RWMutex
+	closed          bool
+	closeMutex      sync.Mutex
+	indexWG         sync.WaitGroup
+	writeWG         sync.WaitGroup
 }
 
 type Segment struct {
 	startOffset int64
 	keyIndex    keyIndex
 	path        string
+	mu          sync.RWMutex
 }
 
 func createDb(directory string, maxSegmentSize int64) (*Db, error) {
+	if err := os.MkdirAll(directory, defaultFileMode); err != nil {
+		return nil, err
+	}
+
 	database := &Db{
 		segments:        make([]*Segment, 0),
 		directory:       directory,
 		maxSegmentSize:  maxSegmentSize,
-		indexOperations: make(chan IndexOperation),
-		keyLocations:    make(chan *KeyLocation),
-		writeOperations: make(chan WriteOperation),
-		writeComplete:   make(chan error),
+		indexOperations: make(chan IndexOperation, 100),
+		writeOperations: make(chan WriteOperation, 100),
 	}
 
 	if err := database.initializeNewSegment(); err != nil {
@@ -84,6 +89,20 @@ func createDb(directory string, maxSegmentSize int64) (*Db, error) {
 }
 
 func (db *Db) Close() error {
+	db.closeMutex.Lock()
+	defer db.closeMutex.Unlock()
+
+	if db.closed {
+		return nil
+	}
+
+	db.closed = true
+	close(db.indexOperations)
+	close(db.writeOperations)
+
+	db.indexWG.Wait()
+	db.writeWG.Wait()
+
 	if db.activeFile != nil {
 		return db.activeFile.Close()
 	}
@@ -91,30 +110,32 @@ func (db *Db) Close() error {
 }
 
 func (db *Db) startIndexHandler() {
+	db.indexWG.Add(1)
 	go func() {
+		defer db.indexWG.Done()
 		for operation := range db.indexOperations {
-			db.indexLock.Lock()
 			if operation.isWrite {
 				db.updateIndex(operation.key, operation.position)
 			} else {
 				segment, pos, err := db.findKeyLocation(operation.key)
 				if err != nil {
-					db.keyLocations <- nil
+					operation.response <- nil
 				} else {
-					db.keyLocations <- &KeyLocation{segment, pos}
+					operation.response <- &KeyLocation{segment, pos}
 				}
 			}
-			db.indexLock.Unlock()
 		}
 	}()
 }
 
 func (db *Db) startWriteHandler() {
+	db.writeWG.Add(1)
 	go func() {
+		defer db.writeWG.Done()
 		for operation := range db.writeOperations {
 			db.fileLock.Lock()
-			entrySize := operation.data.GetLength()
 
+			entrySize := operation.data.GetLength()
 			fileInfo, err := db.activeFile.Stat()
 			if err != nil {
 				operation.response <- err
@@ -130,14 +151,13 @@ func (db *Db) startWriteHandler() {
 				}
 			}
 
+			currentPos := db.currentOffset
 			bytesWritten, err := db.activeFile.Write(operation.data.Encode())
 			if err == nil {
-				db.indexOperations <- IndexOperation{
-					isWrite:  true,
-					key:      operation.data.key,
-					position: int64(bytesWritten),
-				}
+				db.currentOffset += int64(bytesWritten)
+				db.updateIndex(operation.data.key, currentPos)
 			}
+
 			operation.response <- err
 			db.fileLock.Unlock()
 		}
@@ -156,13 +176,20 @@ func (db *Db) initializeNewSegment() error {
 		keyIndex: make(keyIndex),
 	}
 
+	if db.activeFile != nil {
+		db.activeFile.Close()
+	}
+
 	db.activeFile = file
 	db.currentOffset = 0
 	db.activeFilePath = newFilePath
+
+	db.segmentLock.Lock()
 	db.segments = append(db.segments, segment)
+	db.segmentLock.Unlock()
 
 	if len(db.segments) >= minSegments {
-		db.compactOldSegments()
+		go db.compactOldSegments()
 	}
 
 	return nil
@@ -175,31 +202,39 @@ func (db *Db) generateFileName() string {
 }
 
 func (db *Db) compactOldSegments() {
-	go func() {
-		compactedFilePath := db.generateFileName()
-		compactedSegment := &Segment{
-			path:     compactedFilePath,
-			keyIndex: make(keyIndex),
-		}
+	db.segmentLock.Lock()
+	defer db.segmentLock.Unlock()
 
-		var writeOffset int64
-		compactedFile, err := os.OpenFile(compactedFilePath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, defaultFileMode)
-		if err != nil {
-			return
-		}
-		defer compactedFile.Close()
+	if len(db.segments) < minSegments {
+		return
+	}
 
-		lastIndex := len(db.segments) - 2
-		for i := 0; i <= lastIndex; i++ {
-			currentSegment := db.segments[i]
-			for key, position := range currentSegment.keyIndex {
-				if i < lastIndex {
-					if db.keyExistsInNewerSegments(db.segments[i+1:lastIndex+1], key) {
-						continue
-					}
+	compactedFilePath := db.generateFileName()
+	compactedFile, err := os.OpenFile(compactedFilePath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, defaultFileMode)
+	if err != nil {
+		return
+	}
+	defer compactedFile.Close()
+
+	compactedSegment := &Segment{
+		path:     compactedFilePath,
+		keyIndex: make(keyIndex),
+	}
+
+	var writeOffset int64
+	keysWritten := make(map[string]bool)
+
+	for i := len(db.segments) - 2; i >= 0; i-- {
+		segment := db.segments[i]
+		segment.mu.RLock()
+
+		for key, position := range segment.keyIndex {
+			if !keysWritten[key] {
+				value, err := segment.readFromSegment(position)
+				if err != nil {
+					continue
 				}
 
-				value, _ := currentSegment.readFromSegment(position)
 				record := entry{
 					key:   key,
 					value: value,
@@ -209,25 +244,27 @@ func (db *Db) compactOldSegments() {
 				if err == nil {
 					compactedSegment.keyIndex[key] = writeOffset
 					writeOffset += int64(bytesWritten)
+					keysWritten[key] = true
 				}
 			}
 		}
-		db.segments = []*Segment{compactedSegment, db.getCurrentSegment()}
-	}()
-}
-
-func (db *Db) keyExistsInNewerSegments(segments []*Segment, key string) bool {
-	for _, segment := range segments {
-		if _, exists := segment.keyIndex[key]; exists {
-			return true
-		}
+		segment.mu.RUnlock()
 	}
-	return false
+
+	newSegments := []*Segment{compactedSegment, db.segments[len(db.segments)-1]}
+	for i := 0; i < len(db.segments)-1; i++ {
+		os.Remove(db.segments[i].path)
+	}
+
+	db.segments = newSegments
 }
 
 func (db *Db) recoverAllSegments() error {
+	db.segmentLock.RLock()
+	defer db.segmentLock.RUnlock()
+
 	for _, segment := range db.segments {
-		if err := db.recoverSegmentData(segment); err != nil {
+		if err := db.recoverSegmentData(segment); err != nil && err != io.EOF {
 			return err
 		}
 	}
@@ -241,12 +278,13 @@ func (db *Db) recoverSegmentData(segment *Segment) error {
 	}
 	defer file.Close()
 
-	return db.processRecovery(file)
+	return db.processRecovery(file, segment)
 }
 
-func (db *Db) processRecovery(file *os.File) error {
+func (db *Db) processRecovery(file *os.File, segment *Segment) error {
 	var err error
 	var buffer [bufferSize]byte
+	var currentOffset int64
 
 	reader := bufio.NewReaderSize(file, bufferSize)
 	for err == nil {
@@ -262,7 +300,14 @@ func (db *Db) processRecovery(file *os.File) error {
 			return err
 		}
 
+		if len(header) < 4 {
+			return io.EOF
+		}
+
 		recordSize := binary.LittleEndian.Uint32(header)
+		if recordSize == 0 || recordSize > uint32(bufferSize*10) {
+			return fmt.Errorf("invalid record size: %d", recordSize)
+		}
 
 		if recordSize < bufferSize {
 			data = buffer[:recordSize]
@@ -273,26 +318,45 @@ func (db *Db) processRecovery(file *os.File) error {
 		bytesRead, err = reader.Read(data)
 		if err == nil {
 			if bytesRead != int(recordSize) {
-				return fmt.Errorf("data corruption detected")
+				return fmt.Errorf("data corruption detected: expected %d bytes, got %d", recordSize, bytesRead)
 			}
 
 			var record entry
 			record.Decode(data)
-			db.updateIndex(record.key, int64(bytesRead))
+
+			segment.mu.Lock()
+			segment.keyIndex[record.key] = currentOffset
+			segment.mu.Unlock()
+
+			currentOffset += int64(bytesRead)
 		}
 	}
+
+	if segment == db.getCurrentSegment() {
+		db.currentOffset = currentOffset
+	}
+
 	return err
 }
 
-func (db *Db) updateIndex(key string, bytesWritten int64) {
-	db.getCurrentSegment().keyIndex[key] = db.currentOffset
-	db.currentOffset += bytesWritten
+func (db *Db) updateIndex(key string, position int64) {
+	currentSegment := db.getCurrentSegment()
+	currentSegment.mu.Lock()
+	currentSegment.keyIndex[key] = position
+	currentSegment.mu.Unlock()
 }
 
 func (db *Db) findKeyLocation(key string) (*Segment, int64, error) {
+	db.segmentLock.RLock()
+	defer db.segmentLock.RUnlock()
+
 	for i := len(db.segments) - 1; i >= 0; i-- {
 		segment := db.segments[i]
-		if position, found := segment.keyIndex[key]; found {
+		segment.mu.RLock()
+		position, found := segment.keyIndex[key]
+		segment.mu.RUnlock()
+
+		if found {
 			return segment, position, nil
 		}
 	}
@@ -300,12 +364,18 @@ func (db *Db) findKeyLocation(key string) (*Segment, int64, error) {
 }
 
 func (db *Db) getKeyPosition(key string) *KeyLocation {
-	operation := IndexOperation{
-		isWrite: false,
-		key:     key,
+	db.closeMutex.Lock()
+	defer db.closeMutex.Unlock()
+
+	if db.closed {
+		return nil
 	}
-	db.indexOperations <- operation
-	return <-db.keyLocations
+
+	segment, pos, err := db.findKeyLocation(key)
+	if err != nil {
+		return nil
+	}
+	return &KeyLocation{segment, pos}
 }
 
 func (db *Db) Get(key string) (string, error) {
@@ -322,8 +392,15 @@ func (db *Db) Get(key string) (string, error) {
 }
 
 func (db *Db) Put(key, value string) error {
-	responseChannel := make(chan error)
-	db.writeOperations <- WriteOperation{
+	db.closeMutex.Lock()
+	defer db.closeMutex.Unlock()
+
+	if db.closed {
+		return fmt.Errorf("database is closed")
+	}
+
+	responseChannel := make(chan error, 1)
+	operation := WriteOperation{
 		data: entry{
 			key:   key,
 			value: value,
@@ -331,12 +408,17 @@ func (db *Db) Put(key, value string) error {
 		response: responseChannel,
 	}
 
-	err := <-responseChannel
-	close(responseChannel)
-	return err
+	db.writeOperations <- operation
+	return <-responseChannel
 }
 
 func (db *Db) getCurrentSegment() *Segment {
+	db.segmentLock.RLock()
+	defer db.segmentLock.RUnlock()
+
+	if len(db.segments) == 0 {
+		return nil
+	}
 	return db.segments[len(db.segments)-1]
 }
 
