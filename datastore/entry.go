@@ -3,56 +3,106 @@ package datastore
 import (
 	"bufio"
 	"encoding/binary"
-	"errors"
 	"fmt"
-	"io"
 )
 
 type entry struct {
-	key, value string
+	key   string
+	value string
 }
 
-// 0           4    8     kl+8  kl+12     <-- offset
-// (full size) (kl) (key) (vl)  (value)
-// 4           4    ....  4     .....     <-- length
+const (
+	headerSize      = 4
+	keyLengthSize   = 4
+	valueLengthSize = 4
+	totalHeaderSize = headerSize + keyLengthSize + valueLengthSize
+)
+
+func calculateEntryLength(key, value string) int64 {
+	return int64(len(key) + len(value) + totalHeaderSize)
+}
+
+func (e *entry) GetLength() int64 {
+	return calculateEntryLength(e.key, e.value)
+}
+
+func (e *entry) Decode(data []byte) {
+	keyLength := binary.LittleEndian.Uint32(data[headerSize:])
+
+	keyStart := headerSize + keyLengthSize
+	keyEnd := keyStart + int(keyLength)
+
+	keyBytes := make([]byte, keyLength)
+	copy(keyBytes, data[keyStart:keyEnd])
+	e.key = string(keyBytes)
+
+	valueStart := keyEnd
+	valueLength := binary.LittleEndian.Uint32(data[valueStart:])
+
+	valueDataStart := valueStart + valueLengthSize
+	valueDataEnd := valueDataStart + int(valueLength)
+
+	valueBytes := make([]byte, valueLength)
+	copy(valueBytes, data[valueDataStart:valueDataEnd])
+	e.value = string(valueBytes)
+}
+
+func readValue(reader *bufio.Reader) (string, error) {
+	headerBytes, err := reader.Peek(headerSize + keyLengthSize)
+	if err != nil {
+		return "", err
+	}
+
+	keySize := int(binary.LittleEndian.Uint32(headerBytes[headerSize:]))
+
+	bytesToSkip := headerSize + keyLengthSize + keySize
+	_, err = reader.Discard(bytesToSkip)
+	if err != nil {
+		return "", err
+	}
+
+	valueSizeBytes, err := reader.Peek(valueLengthSize)
+	if err != nil {
+		return "", err
+	}
+
+	valueSize := int(binary.LittleEndian.Uint32(valueSizeBytes))
+
+	_, err = reader.Discard(valueLengthSize)
+	if err != nil {
+		return "", err
+	}
+
+	valueData := make([]byte, valueSize)
+	bytesRead, err := reader.Read(valueData)
+	if err != nil {
+		return "", err
+	}
+
+	if bytesRead != valueSize {
+		return "", fmt.Errorf("incomplete value read: got %d bytes, expected %d", bytesRead, valueSize)
+	}
+
+	return string(valueData), nil
+}
 
 func (e *entry) Encode() []byte {
-	kl, vl := len(e.key), len(e.value)
-	size := kl + vl + 12
-	res := make([]byte, size)
-	binary.LittleEndian.PutUint32(res, uint32(size))
-	binary.LittleEndian.PutUint32(res[4:], uint32(kl))
-	copy(res[8:], e.key)
-	binary.LittleEndian.PutUint32(res[kl+8:], uint32(vl))
-	copy(res[kl+12:], e.value)
-	return res
-}
+	keyLength := len(e.key)
+	valueLength := len(e.value)
+	totalSize := keyLength + valueLength + totalHeaderSize
 
-func (e *entry) Decode(input []byte) {
-	e.key = decodeString(input[4:])
-	e.value = decodeString(input[len(e.key)+8:])
-}
+	buffer := make([]byte, totalSize)
 
-func decodeString(v []byte) string {
-	l := binary.LittleEndian.Uint32(v)
-	buf := make([]byte, l)
-	copy(buf, v[4:4+int(l)])
-	return string(buf)
-}
+	binary.LittleEndian.PutUint32(buffer, uint32(totalSize))
 
-func (e *entry) DecodeFromReader(in *bufio.Reader) (int, error) {
-	sizeBuf, err := in.Peek(4)
-	if err != nil {
-		if errors.Is(err, io.EOF) {
-			return 0, err
-		}
-		return 0, fmt.Errorf("DecodeFromReader, cannot read size: %w", err)
-	}
-	buf := make([]byte, int(binary.LittleEndian.Uint32(sizeBuf)))
-	n, err := in.Read(buf[:])
-	if err != nil {
-		return n, fmt.Errorf("DecodeFromReader, cannot read record: %w", err)
-	}
-	e.Decode(buf)
-	return n, nil
+	binary.LittleEndian.PutUint32(buffer[headerSize:], uint32(keyLength))
+
+	copy(buffer[headerSize+keyLengthSize:], e.key)
+
+	valueStart := headerSize + keyLengthSize + keyLength
+	binary.LittleEndian.PutUint32(buffer[valueStart:], uint32(valueLength))
+
+	copy(buffer[valueStart+valueLengthSize:], e.value)
+
+	return buffer
 }
