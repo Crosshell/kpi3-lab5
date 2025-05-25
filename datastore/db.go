@@ -74,11 +74,27 @@ func createDb(directory string, maxSegmentSize int64) (*Db, error) {
 		writeOperations: make(chan WriteOperation, 100),
 	}
 
-	if err := database.initializeNewSegment(); err != nil {
+	files, err := os.ReadDir(directory)
+	if err != nil {
 		return nil, err
+	}
+	for _, file := range files {
+		if file.IsDir() || !file.Type().IsRegular() || !filepath.HasPrefix(file.Name(), dataFileName) {
+			continue
+		}
+		path := filepath.Join(directory, file.Name())
+		segment := &Segment{
+			path:     path,
+			keyIndex: make(keyIndex),
+		}
+		database.segments = append(database.segments, segment)
 	}
 
 	if err := database.recoverAllSegments(); err != nil && err != io.EOF {
+		return nil, err
+	}
+
+	if err := database.initializeNewSegment(); err != nil {
 		return nil, err
 	}
 
@@ -253,7 +269,7 @@ func (db *Db) compactOldSegments() {
 
 	newSegments := []*Segment{compactedSegment, db.segments[len(db.segments)-1]}
 	for i := 0; i < len(db.segments)-1; i++ {
-		os.Remove(db.segments[i].path)
+		_ = os.Remove(db.segments[i].path)
 	}
 
 	db.segments = newSegments
