@@ -10,8 +10,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/roman-mazur/architecture-practice-4-template/httptools"
-	"github.com/roman-mazur/architecture-practice-4-template/signal"
+	"github.com/Crosshell/kpi3-lab5/httptools"
+	"github.com/Crosshell/kpi3-lab5/signal"
 )
 
 var (

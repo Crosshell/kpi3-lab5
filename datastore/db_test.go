@@ -356,7 +356,7 @@ func TestDb_ParallelOperations(t *testing.T) {
 }
 
 func createTestDatabase(directory string, segmentSize int64) (*Db, error) {
-	return createDb(directory, segmentSize)
+	return CreateDb(directory, segmentSize)
 }
 
 func newDb(directory string, segmentSize int64) (*Db, error) {

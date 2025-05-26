@@ -61,7 +61,7 @@ type Segment struct {
 	mu          sync.RWMutex
 }
 
-func createDb(directory string, maxSegmentSize int64) (*Db, error) {
+func CreateDb(directory string, maxSegmentSize int64) (*Db, error) {
 	if err := os.MkdirAll(directory, defaultFileMode); err != nil {
 		return nil, err
 	}

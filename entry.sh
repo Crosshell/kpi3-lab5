@@ -1,11 +1,17 @@
-#!/usr/bin/env sh
+#!/bin/sh
 
-bin=$1
-shift
-
-if [ -z "$bin" ]; then
-  echo "binary is not defined"
-  exit 1
-fi
-
-exec ./"$bin" $@
+case "$1" in
+    "db")
+        exec /opt/practice-4/db
+        ;;
+    "server")
+        exec /opt/practice-4/server
+        ;;
+    "lb")
+        exec /opt/practice-4/balancer
+        ;;
+    *)
+        echo "Unknown command: $1"
+        exit 1
+        ;;
+esac
