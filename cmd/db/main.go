@@ -53,18 +53,15 @@ func (h *dbHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	// Health check endpoint
 	http.HandleFunc("/db/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
 
-	// Create data directory
 	if err := os.MkdirAll("/opt/practice-4/out", 0755); err != nil {
 		log.Fatalf("Failed to create data directory: %v", err)
 	}
 
-	// Initialize DB
 	db, err := datastore.CreateDb("/opt/practice-4/out", 250)
 	if err != nil {
 		log.Fatalf("DB initialization failed: %v", err)
@@ -73,7 +70,6 @@ func main() {
 	handler := &dbHandler{db: db}
 	http.Handle("/db/", handler)
 
-	// Start server
 	log.Println("Starting DB server on :8083")
 	if err := http.ListenAndServe(":8083", nil); err != nil {
 		log.Fatalf("Server failed: %v", err)

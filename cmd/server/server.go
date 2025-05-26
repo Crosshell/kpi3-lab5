@@ -28,14 +28,13 @@ func getPort() int {
 const (
 	confResponseDelaySec = "CONF_RESPONSE_DELAY_SEC"
 	confHealthFailure    = "CONF_HEALTH_FAILURE"
-	teamName             = "crosshell-team" // 🔁 Заміни на свою команду!
+	teamName             = "crosshell-team" 
 	dbServiceURL         = "http://db:8083/db/"
 )
 
 func main() {
 	h := http.NewServeMux()
 
-	// ✅ Health endpoint — необхідний для балансувальника
 	h.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if os.Getenv(confHealthFailure) != "" {
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -46,13 +45,11 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 
-	// ✅ Ініціалізація БД
 	initializeDB()
 
 	report := make(Report)
 
 	h.HandleFunc("/api/v1/some-data", func(rw http.ResponseWriter, r *http.Request) {
-		// Optional response delay
 		respDelayString := os.Getenv(confResponseDelaySec)
 		if delaySec, parseErr := strconv.Atoi(respDelayString); parseErr == nil && delaySec > 0 && delaySec < 300 {
 			time.Sleep(time.Duration(delaySec) * time.Second)
@@ -60,21 +57,18 @@ func main() {
 
 		report.Process(r)
 
-		// Set identification header for load balancer test
 		serverID := os.Getenv("SERVER_ID")
 		if serverID == "" {
 			serverID = fmt.Sprintf("server-%d", getPort())
 		}
 		rw.Header().Set("lb-from", serverID)
 
-		// Parse key
 		key := r.URL.Query().Get("key")
 		if key == "" {
 			rw.WriteHeader(http.StatusBadRequest)
 			return
 		}
 
-		// Fetch from DB service
 		resp, err := http.Get(dbServiceURL + key)
 		if err != nil || resp.StatusCode == http.StatusNotFound {
 			rw.WriteHeader(http.StatusNotFound)
@@ -97,18 +91,14 @@ func main() {
 		_ = json.NewEncoder(rw).Encode(dbResponse.Value)
 	})
 
-	// Report handler
 	h.Handle("/report", report)
 
-	// ✅ Запуск сервера
 	server := httptools.CreateServer(getPort(), h)
 	server.Start()
 
-	// Очікування сигналу завершення
 	signal.WaitForTerminationSignal()
 }
 
-// Функція ініціалізації БД з поточною датою
 func initializeDB() {
 	currentDate := time.Now().Format("2006-01-02")
 	requestBody, _ := json.Marshal(map[string]string{"value": currentDate})

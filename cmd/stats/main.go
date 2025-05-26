@@ -38,7 +38,6 @@ func main()  {
 		if err == nil {
 			var data report
 			if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-				//log.Printf("error parsing froom %s: %s", s, err)
 			} else {
 				for k, v := range data {
 					l := len(v)

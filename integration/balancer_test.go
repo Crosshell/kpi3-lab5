@@ -12,7 +12,6 @@ import (
 const (
 	balancerURL     = "http://balancer:8090/api/v1/some-data"
 	serverHeader    = "lb-from"
-	requiredServers = 1
 	totalRequests   = 10
 	requestTimeout  = 3 * time.Second
 	testTimeout     = 30 * time.Second
@@ -86,7 +85,6 @@ func TestLoadBalancerDistribution(t *testing.T) {
 		case err := <-errs:
 			errors = append(errors, err)
 		case <-results:
-			// Success, do nothing
 		}
 	}
 
@@ -97,9 +95,9 @@ func TestLoadBalancerDistribution(t *testing.T) {
 		}
 	}
 
-	if len(tc.serverHits) < requiredServers {
+	if len(tc.serverHits) < 1 {
 		t.Errorf("Expected at least %d servers, got %d. Hits: %v",
-			requiredServers, len(tc.serverHits), tc.serverHits)
+			1, len(tc.serverHits), tc.serverHits)
 	} else {
 		t.Logf("Load balanced across servers: %v", tc.serverHits)
 	}

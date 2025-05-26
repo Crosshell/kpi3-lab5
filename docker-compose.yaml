@@ -11,11 +11,8 @@ services:
       - '8090:8090'
     depends_on:
       - server1
-        # condition: service_healthy
       - server2
-        # condition: service_healthy
       - server3
-        # condition: service_healthy
 
   db:
     build: .
@@ -36,12 +33,6 @@ services:
       - servers
     ports:
       - '8080:8080'
-    # healthcheck:
-    #   test: ['CMD', 'curl', '-f', 'http://localhost:8080/health']
-    #   interval: 5s
-    #   timeout: 3s
-    #   retries: 5
-    #   start_period: 15s
 
     depends_on:
       db:
@@ -53,12 +44,6 @@ services:
       - servers
     ports:
       - '8081:8080'
-    # healthcheck:
-    #   test: ['CMD', 'curl', '-f', 'http://localhost:8080/health']
-    #   interval: 5s
-    #   timeout: 3s
-    #   retries: 5
-    #   start_period: 15s
 
     depends_on:
       db:
@@ -70,12 +55,6 @@ services:
       - servers
     ports:
       - '8082:8080'
-    # healthcheck:
-    #   test: ['CMD', 'curl', '-f', 'http://localhost:8080/health']
-    #   interval: 5s
-    #   timeout: 3s
-    #   retries: 5
-    #   start_period: 15s
 
     depends_on:
       db:

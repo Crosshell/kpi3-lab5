@@ -69,7 +69,6 @@ func (lb *LoadBalancer) getServer(clientAddr string) (*ServerConnections, error)
 		return nil, fmt.Errorf("no healthy servers available")
 	}
 	
-	// Використовуємо хеш-функцію для обчислення індексу сервера на основі адреси клієнта
 	hash := fnv.New32a()
 	hash.Write([]byte(clientAddr))
 	serverIndex := int(hash.Sum32()) % len(healthyServers)
@@ -150,7 +149,6 @@ func main() {
 	
 	lb := NewLoadBalancer()
 	
-	// Запускаємо періодичну перевірку доступності серверів
 	for i, server := range serversPool {
 		i := i
 		server := server
@@ -163,7 +161,6 @@ func main() {
 			}
 		}()
 		
-		// Перевіряємо стан сервера при запуску
 		go func() {
 			isHealthy := health(server)
 			lb.updateServerHealth(i, isHealthy)
@@ -185,6 +182,5 @@ func main() {
 	log.Printf("Starting load balancer on port %d", *port)
 	log.Printf("Tracing support enabled: %t", *traceEnabled)
 	frontend.Start()
-	// Замінюємо на правильний виклик з пакету signal
 	signal.WaitForTerminationSignal()
 }
