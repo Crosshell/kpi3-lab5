@@ -74,8 +74,8 @@ func main() {
 	http.Handle("/db/", handler)
 
 	// Start server
-	log.Println("Starting DB server on :8081")
-	if err := http.ListenAndServe(":8081", nil); err != nil {
+	log.Println("Starting DB server on :8083")
+	if err := http.ListenAndServe(":8083", nil); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
 }

@@ -15,32 +15,44 @@ import (
 )
 
 var port = flag.Int("port", 8080, "server port")
-const confResponseDelaySec = "CONF_RESPONSE_DELAY_SEC"
-const confHealthFailure = "CONF_HEALTH_FAILURE"
-const teamName = "your-team-name" // Replace with your actual team name
-const dbServiceURL = "http://db:8081/db/"
+
+func getPort() int {
+	if envPort := os.Getenv("PORT"); envPort != "" {
+		if p, err := strconv.Atoi(envPort); err == nil {
+			return p
+		}
+	}
+	return *port
+}
+
+const (
+	confResponseDelaySec = "CONF_RESPONSE_DELAY_SEC"
+	confHealthFailure    = "CONF_HEALTH_FAILURE"
+	teamName             = "crosshell-team" // 🔁 Заміни на свою команду!
+	dbServiceURL         = "http://db:8083/db/"
+)
 
 func main() {
-	h := new(http.ServeMux)
+	h := http.NewServeMux()
 
-	// Initialize database with current date
-	initializeDB()
-
-	h.HandleFunc("/health", func(rw http.ResponseWriter, r *http.Request) {
-		rw.Header().Set("content-type", "text/plain")
-		if failConfig := os.Getenv(confHealthFailure); failConfig == "true" {
-			rw.WriteHeader(http.StatusInternalServerError)
-			_, _ = rw.Write([]byte("FAILURE"))
-		} else {
-			rw.WriteHeader(http.StatusOK)
-			_, _ = rw.Write([]byte("OK"))
+	// ✅ Health endpoint — необхідний для балансувальника
+	h.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if os.Getenv(confHealthFailure) != "" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte("Unhealthy"))
+			return
 		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
 	})
+
+	// ✅ Ініціалізація БД
+	initializeDB()
 
 	report := make(Report)
 
 	h.HandleFunc("/api/v1/some-data", func(rw http.ResponseWriter, r *http.Request) {
-		// Handle response delay if configured
+		// Optional response delay
 		respDelayString := os.Getenv(confResponseDelaySec)
 		if delaySec, parseErr := strconv.Atoi(respDelayString); parseErr == nil && delaySec > 0 && delaySec < 300 {
 			time.Sleep(time.Duration(delaySec) * time.Second)
@@ -48,14 +60,21 @@ func main() {
 
 		report.Process(r)
 
-		// Get key from query parameters
+		// Set identification header for load balancer test
+		serverID := os.Getenv("SERVER_ID")
+		if serverID == "" {
+			serverID = fmt.Sprintf("server-%d", getPort())
+		}
+		rw.Header().Set("lb-from", serverID)
+
+		// Parse key
 		key := r.URL.Query().Get("key")
 		if key == "" {
 			rw.WriteHeader(http.StatusBadRequest)
 			return
 		}
 
-		// Fetch data from DB service
+		// Fetch from DB service
 		resp, err := http.Get(dbServiceURL + key)
 		if err != nil || resp.StatusCode == http.StatusNotFound {
 			rw.WriteHeader(http.StatusNotFound)
@@ -75,45 +94,50 @@ func main() {
 
 		rw.Header().Set("content-type", "application/json")
 		rw.WriteHeader(http.StatusOK)
-		json.NewEncoder(rw).Encode(dbResponse.Value)
+		_ = json.NewEncoder(rw).Encode(dbResponse.Value)
 	})
 
+	// Report handler
 	h.Handle("/report", report)
 
-	server := httptools.CreateServer(*port, h)
+	// ✅ Запуск сервера
+	server := httptools.CreateServer(getPort(), h)
 	server.Start()
+
+	// Очікування сигналу завершення
 	signal.WaitForTerminationSignal()
 }
 
+// Функція ініціалізації БД з поточною датою
 func initializeDB() {
-    currentDate := time.Now().Format("2006-01-02")
-    requestBody, _ := json.Marshal(map[string]string{"value": currentDate})
+	currentDate := time.Now().Format("2006-01-02")
+	requestBody, _ := json.Marshal(map[string]string{"value": currentDate})
 
-    maxRetries := 10
-    retryInterval := 5 * time.Second
+	maxRetries := 10
+	retryInterval := 5 * time.Second
 
-    for i := 0; i < maxRetries; i++ {
-        resp, err := http.Post(
-            dbServiceURL+teamName,
-            "application/json",
-            bytes.NewBuffer(requestBody),
-        )
-        
-        if err == nil && resp.StatusCode == http.StatusOK {
-            fmt.Println("Successfully initialized DB")
-            return
-        }
-        
-        if err != nil {
-            fmt.Printf("Attempt %d: DB connection failed: %v\n", i+1, err)
-        } else {
-            fmt.Printf("Attempt %d: DB returned status %d\n", i+1, resp.StatusCode)
-        }
-        
-        if i < maxRetries-1 {
-            time.Sleep(retryInterval)
-        }
-    }
-    
-    fmt.Println("Failed to initialize DB after multiple attempts")
+	for i := 0; i < maxRetries; i++ {
+		resp, err := http.Post(
+			dbServiceURL+teamName,
+			"application/json",
+			bytes.NewBuffer(requestBody),
+		)
+
+		if err == nil && resp.StatusCode == http.StatusOK {
+			fmt.Println("Successfully initialized DB")
+			return
+		}
+
+		if err != nil {
+			fmt.Printf("Attempt %d: DB connection failed: %v\n", i+1, err)
+		} else {
+			fmt.Printf("Attempt %d: DB returned status %d\n", i+1, resp.StatusCode)
+		}
+
+		if i < maxRetries-1 {
+			time.Sleep(retryInterval)
+		}
+	}
+
+	fmt.Println("Failed to initialize DB after multiple attempts")
 }
